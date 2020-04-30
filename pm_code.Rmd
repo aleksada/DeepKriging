@@ -1,0 +1,231 @@
+---
+title: "PMcode"
+author: "Yuxiao Li"
+date: "4/8/2020"
+output: html_document
+---
+
+```{r read aqs}
+library(dplyr)
+library(fields)
+aqs <- read.csv("daily_88101_2019.csv")
+date <-"2019-06-05"
+aqs_tiny <- aqs%>%
+    filter(Date.Local == date)%>% 
+    filter(Arithmetic.Mean > 0)%>% 
+    filter(Longitude>-125) %>% 
+    filter(Latitude>24) %>%
+    dplyr::select(Longitude,Latitude,PM25 = Arithmetic.Mean)
+
+
+aqs_tiny_unique <- stats::aggregate(PM25~Longitude + Latitude,data=aqs_tiny,FUN = mean)    
+
+quilt.plot(aqs_tiny_unique$Longitude,aqs_tiny_unique$Latitude,aqs_tiny_unique$PM25)
+map("state",add=TRUE)
+```
+
+
+```{r}
+PM_class <- (cut(aqs_tiny_unique$PM25,c(-0.1,12,35.5)))
+levels(PM_class)<-c(0,1)
+aqs_tiny_unique$PM_class <- PM_class
+```
+
+```{r}
+write.csv(aqs_tiny_unique,"pm25_0605.csv")
+```
+
+
+```{r read }
+library(raster)
+library(rgdal)
+file_name <- list.files("./",pattern = ".nc")
+band_idx = as.Date(date)-as.Date("2019-01-01")
+for (i in 1:6){
+    file <- file_name[i]
+    r<-raster(file,band=band_idx)
+    crs(r) <- "+proj=lcc +lon_0=-107 +lat_0=50 +x_0=5632642.22547 +y_0=4612545.65137 +lat_1=50 +lat_2=50 +ellps=WGS84" #This is the coord. ref. shown in the metadata of r above
+    r.pts <- rasterToPoints(r, spatial=TRUE)
+    proj4string(r.pts)
+    geo.prj <- "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0" 
+    r.pts <- spTransform(r.pts, CRS(geo.prj)) 
+    proj4string(r.pts)
+    if(i ==1 ){
+        metero <- data.frame(long=coordinates(r.pts)[,1],lat=coordinates(r.pts)[,2])   
+    }
+    metero <-  data.frame(metero,r.pts@data[1:95025,1])
+}
+names(metero)<-c("long","lat","prec","temp","pres","rh","uwind","vwind")
+
+```
+
+```{r US mask}
+require(sp)
+require(maptools)
+require(maps)
+usa <- map("state", fill = TRUE)
+IDs <- sapply(strsplit(usa$names, ":"), function(x) x[1])
+usa <- map2SpatialPolygons(usa, IDs=IDs, proj4string=CRS("+proj=longlat +datum=WGS84"))
+us.pts = cbind(metero$long,metero$lat)
+us.sp.pts = SpatialPoints(us.pts,proj4string=CRS(proj4string(usa)))
+
+N.pts = nrow(us.pts)
+
+us.mask.indx = c()
+for (i in 1:N.pts){
+    us.mask.indx[i] = sum(rgeos::gCovers(usa,us.sp.pts[i,],byid=T))
+}
+```
+
+```{r}
+us_metero <-metero[us.mask.indx==TRUE,]
+for(i in 3:8){
+    quilt.plot(us_metero$long,us_metero$lat,us_metero[,i])
+    map("state",add=TRUE)
+}
+
+```
+
+```{r}
+write.csv(us_metero,"covariate0605.csv")
+```
+
+
+```{r}
+data_kriging <- read.csv("kriging.csv",header = TRUE)
+#valid_kriging <- read.csv("validkriging.csv",header = TRUE)
+#locations <- as.matrix(train_kriging[,2:3])
+#covariates <- as.matrix(train_kriging[,4:10])
+#observations <- train_kriging[,11]
+names(data_kriging)<- c("index","long","lat","prec","temp","pres","rh","uwind","vwind","pm25","pm25_class","pm25_log")
+test_idx <- read.csv("test_idx.csv",header = TRUE)
+```
+
+### Cross Validation
+
+```{r}
+library(geoR) 
+library(caret)
+mse = mae = acc = c()
+for (i in 1:10){
+    idx = na.exclude(test_idx[,i+1])
+    train_kriging=data_kriging[-idx,]
+    valid_kriging=data_kriging[idx,]
+    geodata_train = as.geodata(train_kriging, coords.col = 2:3, data.col = 10,covar.col = 4:9)
+    geodata_valid = as.geodata(valid_kriging,coords.col = 2:3,data.col = 10,covar.col = 4:9)
+    geoR_fit = likfit(geodata_train, ini.cov.pars = c(0.5, 0.5),
+                      trend = trend.spatial(trend='1st', geodata = geodata_train, add.to.trend = ~prec+temp+pres+rh+uwind+vwind))
+    krig_control = krige.control(type.krige = "OK", 
+                                 trend.d = trend.spatial(trend='1st', geodata = geodata_train, add.to.trend = ~ prec + temp + pres + rh + uwind + vwind),
+                                 trend.l = trend.spatial(trend = '1st', geodata = geodata_valid, add.to.trend = ~ prec + temp + pres + rh + uwind + vwind), obj.model = geoR_fit)
+
+    result = krige.conv(geodata_train, locations = geodata_valid$coords,krige=krig_control)
+    mse[i] = mean((result$predict-valid_kriging[,10])^2)
+    mae[i] = mean(abs(result$predict-valid_kriging[,10]))
+    Pred_class <- cut(result$predict,c(-0.1,12,35.5))
+levels(Pred_class)<-c(0,1)
+    acc[i] = confusionMatrix(Pred_class,as.factor(valid_kriging[,11]))$over[1]
+}
+
+```
+
+```{r}
+mean(mse)
+sd(mse)
+mean(mae)
+sd(mae)
+mean(acc)
+sd(acc)
+```
+
+
+```{r}
+mse_log = mae_log = acc_log = c()
+for (i in 1:10){
+    idx = na.exclude(test_idx[,i+1])
+    train_kriging=data_kriging[-idx,]
+    valid_kriging=data_kriging[idx,]
+    geodata_train = as.geodata(train_kriging, coords.col = 2:3, data.col = 12,covar.col = 4:9)
+    geodata_valid = as.geodata(valid_kriging,coords.col = 2:3,data.col = 12,covar.col = 4:9)
+    geoR_fit = likfit(geodata_train, ini.cov.pars = c(0.5, 0.5),
+                      trend = trend.spatial(trend='1st', geodata = geodata_train, add.to.trend = ~prec+temp+pres+rh+uwind+vwind))
+    krig_control = krige.control(type.krige = "OK", 
+                                 trend.d = trend.spatial(trend='1st', geodata = geodata_train, add.to.trend = ~ prec + temp + pres + rh + uwind + vwind),
+                                 trend.l = trend.spatial(trend = '1st', geodata = geodata_valid, add.to.trend = ~ prec + temp + pres + rh + uwind + vwind), obj.model = geoR_fit)
+
+    result = krige.conv(geodata_train, locations = geodata_valid$coords,krige=krig_control)
+    mse_log[i] = mean((exp(result$predict)-valid_kriging[,10])^2)
+    mae_log[i] = mean(abs(exp(result$predict)-valid_kriging[,10]))
+    Pred_class <- cut(exp(result$predict),c(-0.1,12,35.5))
+levels(Pred_class)<-c(0,1)
+    acc_log[i] = confusionMatrix(Pred_class,as.factor(valid_kriging[,11]))$over[1]
+}
+
+```
+
+```{r}
+mean(mse_log)
+sd(mse_log)
+mean(mae_log)
+sd(mae_log)
+mean(acc_log)
+sd(acc_log)
+```
+
+```{r}
+mse_nx = mae_nx = acc_nx = c()
+for (i in 1:10){
+    idx = na.exclude(test_idx[,i+1])
+    train_kriging=data_kriging[-idx,]
+    valid_kriging=data_kriging[idx,]
+    geodata_train = as.geodata(train_kriging, coords.col = 2:3, data.col = 10,covar.col = 4:9)
+    geodata_valid = as.geodata(valid_kriging,coords.col = 2:3,data.col = 10,covar.col = 4:9)
+    geoR_fit = likfit(geodata_train, ini.cov.pars = c(0.5, 0.5))
+    krig_control = krige.control(type.krige = "OK",  obj.model = geoR_fit)
+
+    result = krige.conv(geodata_train, locations = geodata_valid$coords,krige=krig_control)
+    mse_nx[i] = mean((result$predict-valid_kriging[,10])^2)
+    mae_nx[i] = mean(abs(result$predict-valid_kriging[,10]))
+    Pred_class <- cut(result$predict,c(-0.1,12,35.5))
+levels(Pred_class)<-c(0,1)
+    acc_log[i] = confusionMatrix(Pred_class,as.factor(valid_kriging[,11]))$over[1]
+}
+
+```
+
+
+```{r}
+pred_data = read.csv("PM25_pred_0605.csv")
+names(pred_data)<- c("index","long","lat","prec","temp","pres","rh","uwind","vwind","pm25")
+```
+
+```{r Kriging prediction}
+geodata_train = as.geodata(data_kriging, coords.col = 2:3, data.col = 10,covar.col = 4:9)
+geodata_pred = as.geodata(pred_data,coords.col = 2:3,data.col = 10,covar.col = 4:9)
+
+geoR_fit = likfit(geodata_train, ini.cov.pars = c(0.5, 0.5),
+                      trend = trend.spatial(trend='1st', geodata = geodata_train, add.to.trend = ~prec+temp+pres+rh+uwind+vwind))
+
+krig_control = krige.control(type.krige = "OK", 
+                                 trend.d = trend.spatial(trend='1st', geodata = geodata_train, add.to.trend = ~ prec + temp + pres + rh + uwind + vwind),
+                                 trend.l = trend.spatial(trend = '1st', geodata = geodata_pred, add.to.trend = ~ prec + temp + pres + rh + uwind + vwind), obj.model = geoR_fit)
+
+result = krige.conv(geodata_train, locations = geodata_pred$coords,krige=krig_control)
+```
+
+```{r}
+DK_prediction <- pred_data[,10]
+risk_pred <- read.csv("risk_pred.csv")[,2]
+par(mfrow=c(2,2), mar=c(2,3,1.5,2), mgp=c(1.5,0.5,0))
+quilt.plot(aqs_tiny_unique$Longitude,aqs_tiny_unique$Latitude,aqs_tiny_unique$PM25,zlim=c(0,25),main="(a)")
+map("state",add=TRUE)
+quilt.plot(us_metero$long,us_metero$lat,DK_prediction,zlim=c(0,25),main="(b)")
+map("state",add=TRUE)
+quilt.plot(us_metero$long,us_metero$lat,1-risk_pred,zlim=c(0,1),main="(c)")
+map("state",add=TRUE)
+quilt.plot(us_metero$long,us_metero$lat,result$predict,zlim=c(0,25),main="(d)")
+map("state",add=TRUE)
+
+```
+
+
