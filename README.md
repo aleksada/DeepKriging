@@ -8,7 +8,7 @@ This project proposes a novel spatial prediction method by incorporating deep le
 ## Implementation
 The methods are implemented using "Keras" in Python. However, it can be also implemented with R interface to Keras. We also include a simple example of DeepKriging in R (DeepKriging_Example.r).
 
-The codes for reproducibility are all in the repository. You can either run the .py file using a Python IDE or .ipynb using Jupyter Notebook. The density estimation in the DeepKriging depends on the codes in the dcdr directory, which is developed by Rui Li and Brian Reich (https://github.com/RLstat/deep-conditional-distribution-regression). The authors acknowledge their contributions in the paper.
+The codes for reproducibility are all in the repository. You can either run the .py file using a Python IDE or .ipynb using Jupyter Notebook. The density estimation in the DeepKriging depends on the codes in the "dcdr" directory, which is developed by Rui Li and Brian Reich (https://github.com/RLstat/deep-conditional-distribution-regression). The authors acknowledge their contributions in the paper.
 
 ### Author
-- Yuxiao Li, Ying Sun, Brian Reich.
+- Yuxiao Li, Ying Sun, Brian J Reich.
